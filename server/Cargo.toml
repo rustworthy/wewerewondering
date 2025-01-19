@@ -30,3 +30,6 @@ ulid = { version = "1.0.0", features = ["serde"] }
 [[bin]]
 name = "lambda"
 path = "./src/lambda.rs"
+
+[dev-dependencies]
+fantoccini = "0.21.4"
