@@ -83,4 +83,5 @@ jobs:
       - name: Run end-to-end tests
         env:
           USE_DYNAMODB: local
+          HEADLESS: 1
         run: cargo t --release --test e2e --features e2e-test

@@ -126,8 +126,14 @@ Run the e2e test suite with:
 USE_DYNAMODB=local cargo t --release --test e2e --features e2e-test
 ```
 
-If you've launch a web driver on a diffrent port (which you may want to do in order
-to test with a different engine), make sure to provide `WEBDRIVER_PORT` to the test
+To run the e2e tests in a headless mode, hit:
+
+```sh
+USE_DYNAMODB=local HEADLESS=1 cargo t --release --test e2e --features e2e-test
+```
+
+Note, that if you've launch a web driver on a diffrent port (which you may want to do in order
+to test with a different engine), you will want to provide `WEBDRIVER_PORT` to the test
 run command:
 
 ```sh

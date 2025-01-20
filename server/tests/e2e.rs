@@ -21,6 +21,25 @@ static WEBDRIVER_ADDRESS: LazyLock<String> = LazyLock::new(|| {
 
 static SERVER_TASK_HANDLE: OnceLock<(String, ServerTaskHandle)> = OnceLock::new();
 
+async fn init_webdriver_client() -> Client {
+    let mut caps = serde_json::map::Map::new();
+    if std::env::var("HEADLESS").ok().is_some() {
+        let opts = serde_json::json!({
+            "args": [
+                "--headless",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+            ],
+        });
+        caps.insert("goog:chromeOptions".to_string(), opts);
+    }
+    ClientBuilder::native()
+        .capabilities(caps)
+        .connect(&WEBDRIVER_ADDRESS)
+        .await
+        .expect("web driver to be available")
+}
+
 fn init() -> &'static (String, ServerTaskHandle) {
     SERVER_TASK_HANDLE.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -52,12 +71,12 @@ macro_rules! test {
         #[tokio::test(flavor = "multi_thread")]
         async fn $test_name() {
             let (app_addr, _) = init();
-            let c = ClientBuilder::native()
-                .connect(&WEBDRIVER_ADDRESS)
-                .await
-                .expect("web driver to be available");
+            let c = init_webdriver_client().await;
+            // run the test as a task catching any errors
             let res = tokio::spawn($test_fn(c.clone(), app_addr)).await;
+            // clean up and ...
             c.close().await.unwrap();
+            //  ... fail the test, if errors returned from the task
             if let Err(e) = res {
                 std::panic::resume_unwind(Box::new(e));
             }
@@ -65,13 +84,11 @@ macro_rules! test {
     };
 }
 
-async fn start_event(c: Client, welcome_page: &String) {
-    c.goto(welcome_page).await.unwrap();
+// ------------------------------- TESTS --------------------------------------
 
-    assert_eq!(
-        c.current_url().await.unwrap().as_ref(),
-        format!("{}/", welcome_page)
-    );
+async fn start_new_q_and_a_session(c: Client, url: &String) {
+    c.goto(url).await.unwrap();
+    assert_eq!(c.current_url().await.unwrap().as_ref(), format!("{}/", url));
     assert_eq!(c.title().await.unwrap(), "Q&A");
 
     // locate the "Open new Q&A session" button
@@ -92,4 +109,4 @@ async fn start_event(c: Client, welcome_page: &String) {
     // starting an event gives you a URL with an event + secret
 }
 
-test!(test_start_event, start_event);
+test!(test_start_new_q_and_a_session, start_new_q_and_a_session);
