@@ -123,7 +123,7 @@ chromedriver --port=4444
 Run the e2e test suite with:
 
 ```sh
-USE_DYNAMODB=local cargo t --release --test e2e -- --include-ignored
+USE_DYNAMODB=local cargo t --release --test e2e --features e2e-test
 ```
 
 If you've launch a web driver on a diffrent port (which you may want to do in order
@@ -131,5 +131,5 @@ to test with a different engine), make sure to provide `WEBDRIVER_PORT` to the t
 run command:
 
 ```sh
-WEBDRIVER_PORT=<port_goes_here> USE_DYNAMODB=local cargo t --release --test e2e -- --include-ignored
+WEBDRIVER_PORT=<port_goes_here> USE_DYNAMODB=local cargo t --release --test e2e --features e2e-test
 ```

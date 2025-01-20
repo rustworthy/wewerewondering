@@ -1,5 +1,16 @@
-use fantoccini::{ClientBuilder, Locator};
-use std::sync::LazyLock;
+#![cfg(feature = "e2e-test")]
+
+use fantoccini::{Client, ClientBuilder, Locator};
+use std::io;
+use std::sync::{LazyLock, OnceLock};
+use std::time::Duration;
+use tokio::task::JoinHandle;
+use tower_http::services::ServeDir;
+use wewerewondering_api::build_app;
+
+type ServerTaskHandle = JoinHandle<Result<(), io::Error>>;
+
+const TESTRUN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 static WEBDRIVER_ADDRESS: LazyLock<String> = LazyLock::new(|| {
     let port = std::env::var("WEBDRIVER_PORT")
@@ -8,27 +19,77 @@ static WEBDRIVER_ADDRESS: LazyLock<String> = LazyLock::new(|| {
     format!("http://localhost:{}", port)
 });
 
-#[ignore]
-#[tokio::test]
-async fn main() -> Result<(), fantoccini::error::CmdError> {
-    let c = ClientBuilder::native()
-        .connect(&WEBDRIVER_ADDRESS)
-        .await
-        .expect("failed to connect to WebDriver");
+static SERVER_TASK_HANDLE: OnceLock<(String, ServerTaskHandle)> = OnceLock::new();
 
-    // first, go to the Wikipedia page for Foobar
-    c.goto("https://en.wikipedia.org/wiki/Foobar").await?;
-    let url = c.current_url().await?;
-    assert_eq!(url.as_ref(), "https://en.wikipedia.org/wiki/Foobar");
-
-    // click "Foo (disambiguation)"
-    c.find(Locator::Css(".mw-disambig")).await?.click().await?;
-
-    // click "Foo Lake"
-    c.find(Locator::LinkText("Foo Lake")).await?.click().await?;
-
-    let url = c.current_url().await?;
-    assert_eq!(url.as_ref(), "https://en.wikipedia.org/wiki/Foo_Lake");
-
-    c.close().await
+fn init() -> &'static (String, ServerTaskHandle) {
+    SERVER_TASK_HANDLE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = tokio::spawn(async move {
+            let app = build_app().await;
+            let app = app.fallback_service(ServeDir::new(format!(
+                "{}/client/dist",
+                std::env::current_dir()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )));
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            let assigned_addr = listener.local_addr().unwrap();
+            tx.send(assigned_addr).unwrap();
+            axum::serve(listener, app.into_make_service()).await
+        });
+        let assigned_addr = rx.recv_timeout(TESTRUN_SETUP_TIMEOUT).unwrap();
+        let app_addr = format!("http://localhost:{}", assigned_addr.port());
+        (app_addr, handle)
+    })
 }
+
+macro_rules! test {
+    ($test_name:ident, $test_fn:expr) => {
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $test_name() {
+            let (app_addr, _) = init();
+            let c = ClientBuilder::native()
+                .connect(&WEBDRIVER_ADDRESS)
+                .await
+                .expect("web driver to be available");
+            let res = tokio::spawn($test_fn(c.clone(), app_addr)).await;
+            c.close().await.unwrap();
+            if let Err(e) = res {
+                std::panic::resume_unwind(Box::new(e));
+            }
+        }
+    };
+}
+
+async fn start_event(c: Client, welcome_page: &String) {
+    c.goto(welcome_page).await.unwrap();
+
+    assert_eq!(
+        c.current_url().await.unwrap().as_ref(),
+        format!("{}/", welcome_page)
+    );
+    assert_eq!(c.title().await.unwrap(), "Q&A");
+
+    // locate the "Open new Q&A session" button
+    // TODO: consider adding `data-testid` to the button element
+    // TODO: so that if we could change the button text w/o the need
+    // TODO: to update out end-to-end tests.
+    // TODO: for reference: https://playwright.dev/docs/locators#locate-by-test-id
+    let new_event_btn = c
+        .find(Locator::Css("button"))
+        .await
+        .expect("single button on the welcome page");
+    assert_eq!(
+        new_event_btn.text().await.unwrap().to_lowercase(),
+        "Open new Q&A session".to_lowercase()
+    );
+    new_event_btn.click().await.unwrap();
+
+    // starting an event gives you a URL with an event + secret
+}
+
+test!(test_start_event, start_event);
