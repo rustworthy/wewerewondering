@@ -11,6 +11,7 @@ use wewerewondering_api::build_app;
 type ServerTaskHandle = JoinHandle<Result<(), io::Error>>;
 
 const TESTRUN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 static WEBDRIVER_ADDRESS: LazyLock<String> = LazyLock::new(|| {
     let port = std::env::var("WEBDRIVER_PORT")
@@ -22,17 +23,18 @@ static WEBDRIVER_ADDRESS: LazyLock<String> = LazyLock::new(|| {
 static SERVER_TASK_HANDLE: OnceLock<(String, ServerTaskHandle)> = OnceLock::new();
 
 async fn init_webdriver_client() -> Client {
-    let mut caps = serde_json::map::Map::new();
+    let mut chrome_args = vec!["--disable-notifications", "--enable-automation"];
     if std::env::var("HEADLESS").ok().is_some() {
-        let opts = serde_json::json!({
-            "args": [
-                "--headless",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-            ],
-        });
-        caps.insert("goog:chromeOptions".to_string(), opts);
+        chrome_args.extend(["--headless", "--disable-gpu", "--disable-dev-shm-usage"]);
     }
+    let mut caps = serde_json::map::Map::new();
+    caps.insert(
+        "goog:chromeOptions".to_string(),
+        serde_json::json!({
+            "args": chrome_args,
+        }),
+    );
+    println!("{:?}", caps);
     ClientBuilder::native()
         .capabilities(caps)
         .connect(&WEBDRIVER_ADDRESS)
@@ -87,26 +89,46 @@ macro_rules! test {
 // ------------------------------- TESTS --------------------------------------
 
 async fn start_new_q_and_a_session(c: Client, url: &String) {
+    // the host novigates to the app's welcome page
     c.goto(url).await.unwrap();
     assert_eq!(c.current_url().await.unwrap().as_ref(), format!("{}/", url));
     assert_eq!(c.title().await.unwrap(), "Q&A");
-
-    // locate the "Open new Q&A session" button
-    // TODO: consider adding `data-testid` to the button element
-    // TODO: so that if we could change the button text w/o the need
-    // TODO: to update out end-to-end tests.
-    // TODO: for reference: https://playwright.dev/docs/locators#locate-by-test-id
-    let new_event_btn = c
-        .find(Locator::Css("button"))
-        .await
-        .expect("single button on the welcome page");
+    let new_event_btn = c.find(Locator::Css("button")).await.unwrap();
     assert_eq!(
         new_event_btn.text().await.unwrap().to_lowercase(),
-        "Open new Q&A session".to_lowercase()
+        "open new q&a session"
     );
+
+    // clicks the "Open new Q&A session" and ...
     new_event_btn.click().await.unwrap();
 
-    // starting an event gives you a URL with an event + secret
+    // ... gets to the event's host view where they can
+    let share_event_btn = c
+        .wait()
+        .at_most(DEFAULT_WAIT_TIMEOUT)
+        .for_element(Locator::Css("[data-testid=share-event-button]"))
+        .await
+        .unwrap();
+    let path = c.current_url().await.unwrap();
+    let mut params = path.path_segments().unwrap();
+    assert_eq!(params.next().unwrap(), "event");
+    let _event_id = params.next().unwrap();
+    let _host_secret = params.next().unwrap();
+    assert!(params.next().is_none());
+
+    // where there are initially no pending questions
+    let r = c
+        .find(Locator::Css("[data-testid=pending-questions]"))
+        .await;
+
+    share_event_btn.click().await.unwrap();
+
+    let clipboard_content = c
+        .execute_async("navigator.clipboard.read()", vec![])
+        .await
+        .unwrap();
+
+    println!("{:}", clipboard_content);
 }
 
 test!(test_start_new_q_and_a_session, start_new_q_and_a_session);
