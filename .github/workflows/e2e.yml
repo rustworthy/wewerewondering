@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - main
+      - end-to-end
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
