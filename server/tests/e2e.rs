@@ -1,11 +1,13 @@
 #![cfg(feature = "e2e-test")]
 
+use fantoccini::wd::WebDriverCompatibleCommand;
 use fantoccini::{Client, ClientBuilder, Locator};
 use std::io;
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
+use url::{ParseError, Url};
 use wewerewondering_api::build_app;
 
 type ServerTaskHandle = JoinHandle<Result<(), io::Error>>;
@@ -23,7 +25,7 @@ static WEBDRIVER_ADDRESS: LazyLock<String> = LazyLock::new(|| {
 static SERVER_TASK_HANDLE: OnceLock<(String, ServerTaskHandle)> = OnceLock::new();
 
 async fn init_webdriver_client() -> Client {
-    let mut chrome_args = vec!["--disable-notifications", "--enable-automation"];
+    let mut chrome_args = Vec::new();
     if std::env::var("HEADLESS").ok().is_some() {
         chrome_args.extend(["--headless", "--disable-gpu", "--disable-dev-shm-usage"]);
     }
@@ -34,7 +36,6 @@ async fn init_webdriver_client() -> Client {
             "args": chrome_args,
         }),
     );
-    println!("{:?}", caps);
     ClientBuilder::native()
         .capabilities(caps)
         .connect(&WEBDRIVER_ADDRESS)
@@ -85,6 +86,24 @@ macro_rules! test {
         }
     };
 }
+#[derive(Debug, Clone)]
+struct GrantClipboardReadCmd;
+
+impl WebDriverCompatibleCommand for GrantClipboardReadCmd {
+    fn endpoint(&self, base_url: &Url, session_id: Option<&str>) -> Result<Url, ParseError> {
+        base_url.join(format!("session/{}/permissions", session_id.as_ref().unwrap()).as_str())
+    }
+
+    fn method_and_body(&self, _: &url::Url) -> (http::Method, Option<String>) {
+        (
+            http::Method::POST,
+            Some(
+                serde_json::json!({"descriptor": {"name": "clipboard-read"}, "state": "granted"})
+                    .to_string(),
+            ),
+        )
+    }
+}
 
 // ------------------------------- TESTS --------------------------------------
 
@@ -93,42 +112,73 @@ async fn start_new_q_and_a_session(c: Client, url: &String) {
     c.goto(url).await.unwrap();
     assert_eq!(c.current_url().await.unwrap().as_ref(), format!("{}/", url));
     assert_eq!(c.title().await.unwrap(), "Q&A");
-    let new_event_btn = c.find(Locator::Css("button")).await.unwrap();
-    assert_eq!(
-        new_event_btn.text().await.unwrap().to_lowercase(),
-        "open new q&a session"
-    );
+    let create_event_btn = c
+        .wait()
+        .at_most(DEFAULT_WAIT_TIMEOUT)
+        .for_element(Locator::Css("[data-testid=create-event-button]"))
+        .await
+        .unwrap();
 
-    // clicks the "Open new Q&A session" and ...
-    new_event_btn.click().await.unwrap();
+    // starts a new Q&A session and ...
+    create_event_btn.click().await.unwrap();
 
-    // ... gets to the event's host view where they can
+    // ... gets redirected to the event's host view where they can ...
     let share_event_btn = c
         .wait()
         .at_most(DEFAULT_WAIT_TIMEOUT)
         .for_element(Locator::Css("[data-testid=share-event-button]"))
         .await
         .unwrap();
-    let path = c.current_url().await.unwrap();
-    let mut params = path.path_segments().unwrap();
+    let event_url_for_host = c.current_url().await.unwrap();
+    let mut params = event_url_for_host.path_segments().unwrap();
     assert_eq!(params.next().unwrap(), "event");
-    let _event_id = params.next().unwrap();
+    let event_id = params.next().unwrap();
     let _host_secret = params.next().unwrap();
     assert!(params.next().is_none());
 
-    // where there are initially no pending questions
-    let r = c
-        .find(Locator::Css("[data-testid=pending-questions]"))
-        .await;
-
+    // ... grab the event's guest url to share it later with folks
     share_event_btn.click().await.unwrap();
+    c.issue_cmd(GrantClipboardReadCmd).await.unwrap();
+    let event_url_for_guest: Url = c
+        .execute_async(
+            r#"
+                const [callback] = arguments;
+                navigator.clipboard.readText().then((text) => callback(text))
+                
+            "#,
+            vec![],
+        )
+        .await
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut params = event_url_for_guest.path_segments().unwrap();
+    assert_eq!(params.next().unwrap(), "event");
+    assert_eq!(params.next().unwrap(), event_id); // same event id
+    assert!(params.next().is_none()); // but no secret
 
-    let clipboard_content = c
-        .execute_async("navigator.clipboard.read()", vec![])
+    // and there are currently no pending, answered, or hidden questions
+    // related to the newly created event
+    let pending_questions = c
+        .find(Locator::Css("section[data-testid=pending-questions]"))
+        .await
+        .unwrap()
+        .find_all(Locator::Css("article"))
         .await
         .unwrap();
-
-    println!("{:}", clipboard_content);
+    assert!(pending_questions.is_empty());
+    assert!(c
+        .find(Locator::Css("section[data-testid=answered-questions]"))
+        .await
+        .unwrap_err()
+        .is_no_such_element());
+    assert!(c
+        .find(Locator::Css("section[data-testid=hidden-questions]"))
+        .await
+        .unwrap_err()
+        .is_no_such_element());
 }
 
 test!(test_start_new_q_and_a_session, start_new_q_and_a_session);

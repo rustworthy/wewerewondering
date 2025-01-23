@@ -113,14 +113,21 @@ Prerequisites:
 - [google-chrome](https://www.google.com/chrome/)
 - [chromedriver](https://googlechromelabs.github.io/chrome-for-testing/#stable)
 - DynamoDB Local [container](#backend-with-dynamodb-local)
+- `wewerewondering` client [setup](#setup)
 
-Make sure those binaries are in your path and launch the driver process:
+Make sure chrome binaries are in your path and launch the driver process:
 
 ```sh
 chromedriver --port=4444
 ```
 
-Run the e2e test suite with:
+Prepare the client distribution first:
+
+```sh
+cd client && npm run build
+```
+
+Now, to run the e2e test suite, go to the `server` directory and issue:
 
 ```sh
 USE_DYNAMODB=local cargo t --release --test e2e --features e2e-test
